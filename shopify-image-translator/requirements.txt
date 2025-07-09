@@ -1,6 +1,0 @@
-Flask
-Pillow
-google-cloud-vision
-google-cloud-translate
-requests
-python-dotenv
