@@ -1,6 +1,7 @@
-Flask
+Flask==2.3.2
+gunicorn==21.2.0
+requests
 Pillow
 google-cloud-vision
 google-cloud-translate
-requests
-python-dotenv
+google-auth
