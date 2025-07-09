@@ -6,11 +6,11 @@ services:
     startCommand: gunicorn app:app
     envVars:
       - key: SHOPIFY_API_KEY
-        value: your_key
+        value: fd2336963b8f4d26533423cf1d91340c
       - key: SHOPIFY_API_PASSWORD
-        value: your_password
+        value: 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
       - key: SHOPIFY_STORE
-        value: yourshop.myshopify.com
+        value: 725e1e-4f.myshopify.com
       - key: GOOGLE_APPLICATION_CREDENTIALS
         value: /etc/secrets/google-creds.json
     secretFiles:
