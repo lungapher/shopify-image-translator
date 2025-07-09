@@ -5,3 +5,4 @@ Pillow
 google-cloud-vision
 google-cloud-translate
 google-auth
+python-dotenv
