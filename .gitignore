@@ -1,19 +1,23 @@
-# Do not track secret keys
+# 🚫 Environment variables and secrets
 .env
 
-# Python cache files
+# 🐍 Python cache and compiled files
 __pycache__/
 *.py[cod]
+*.pyo
+*.pyd
 
-# macOS
+# 🧪 Test and debug artifacts
+*.log
+*.db
+*.sqlite3
+
+# 💻 macOS
 .DS_Store
 
-# VS Code settings
+# 🛠️ VSCode settings
 .vscode/
 
-# Logs
-*.log
-
-# Railway build artifacts
-*.sqlite3
-*.db
+# 📦 Virtual environments
+venv/
+env/
