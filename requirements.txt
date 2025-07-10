@@ -4,3 +4,4 @@ Pillow
 google-cloud-vision
 google-cloud-translate
 python-dotenv
+gunicorn
