@@ -1,7 +1,19 @@
+# Do not track secret keys
 .env
+
+# Python cache files
 __pycache__/
-*.pyc
-*.pyo
-*.pyd
+*.py[cod]
+
+# macOS
 .DS_Store
+
+# VS Code settings
 .vscode/
+
+# Logs
+*.log
+
+# Railway build artifacts
+*.sqlite3
+*.db
