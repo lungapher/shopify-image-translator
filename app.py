@@ -24,7 +24,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return '✅ Shopify Translator is running. Visit /start to translate images or /preview?image_url=... to test one.'
+    return '✅ Shopify Translator is running. Visit /start or /test-salibay to test a Chinese image.'
 
 def detect_and_translate(image_url):
     try:
@@ -55,7 +55,7 @@ def detect_and_translate(image_url):
         draw = ImageDraw.Draw(base_img)
         font = ImageFont.load_default()
 
-        for text_data in annotations[1:]:  # skip first (full text)
+        for text_data in annotations[1:]:  # skip the full block
             orig_text = text_data["description"]
             bbox = text_data["boundingPoly"]["vertices"]
 
@@ -86,15 +86,6 @@ def detect_and_translate(image_url):
     except Exception as e:
         print(f"[ERROR] detect_and_translate failed: {e}")
         return None
-
-def upload_image_to_shopify(product_id, image_data):
-    encoded = base64.b64encode(image_data.read()).decode()
-    payload = { "image": { "attachment": encoded } }
-
-    url = f"https://{SHOPIFY_STORE}/admin/api/2023-01/products/{product_id}/images.json"
-    response = requests.post(url, headers=SHOPIFY_HEADERS, json=payload)
-    print(f"📤 Uploaded image to product {product_id}. Response: {response.status_code}")
-    return response.json()
 
 @app.route('/start', methods=['GET'])
 def process_products():
@@ -133,3 +124,9 @@ def preview():
         return "❌ Please provide an image URL via ?image_url="
     result = detect_and_translate(image_url)
     return "✅ Image translated and processed." if result else "❌ Failed to process the image."
+
+@app.route('/test-salibay')
+def test_salibay():
+    image_url = "https://salibay.com/cdn/shop/files/O1CN01hYSNtF1miYdArdBvr__2219787484988-0-cib.jpg"
+    result = detect_and_translate(image_url)
+    return "✅ Salibay image translated and processed." if result else "❌ Failed to process Salibay image."
