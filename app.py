@@ -1,6 +1,7 @@
 import os
 import requests
 import base64
+import re
 from PIL import Image, ImageDraw, ImageFont
 from flask import Flask, jsonify, send_file, request
 from io import BytesIO
@@ -26,6 +27,10 @@ app = Flask(__name__)
 def home():
     return '✅ Shopify Translator is running. Use /start or /test-ocr?img=URL'
 
+def contains_chinese(text):
+    """Detect Chinese characters using Unicode ranges"""
+    return any('\u4e00' <= char <= '\u9fff' for char in text)
+
 def detect_and_translate(image_url):
     try:
         print(f"🔍 Processing image: {image_url}")
@@ -42,13 +47,9 @@ def detect_and_translate(image_url):
         }
 
         vision_resp = requests.post(VISION_URL, json=vision_payload).json()
-        print("📦 Vision API response:", vision_resp)
-
-        if "responses" not in vision_resp or not vision_resp["responses"]:
-            return None
-
-        annotations = vision_resp["responses"][0].get("textAnnotations", [])
+        annotations = vision_resp.get("responses", [{}])[0].get("textAnnotations", [])
         if not annotations:
+            print("⚠️ No text found in image.")
             return None
 
         img_bytes = requests.get(image_url).content
@@ -56,8 +57,14 @@ def detect_and_translate(image_url):
         draw = ImageDraw.Draw(base_img)
         font = ImageFont.load_default()
 
+        found_chinese = False
+
         for text_data in annotations[1:]:
             orig_text = text_data["description"]
+            if not contains_chinese(orig_text):
+                continue
+
+            found_chinese = True
             bbox = text_data["boundingPoly"]["vertices"]
 
             translate_resp = requests.post(TRANSLATE_URL, json={
@@ -76,6 +83,10 @@ def detect_and_translate(image_url):
             y = bbox[0].get("y", 0)
             draw.rectangle([x, y, x + 100, y + 20], fill="white")
             draw.text((x, y), translated, fill="black", font=font)
+
+        if not found_chinese:
+            print("🚫 No Chinese text detected. Skipping image.")
+            return None
 
         output = BytesIO()
         base_img.save(output, format="JPEG")
@@ -101,18 +112,26 @@ def process_products():
     except Exception as e:
         return jsonify({"error": "Failed to fetch products", "details": str(e)}), 500
 
-    results = []
+    updated = []
 
     for product in products:
+        title = product.get("title")
+        print(f"\n📦 Processing Product: {title}")
+
         for image in product.get("images", []):
-            processed_image = detect_and_translate(image["src"])
+            image_url = image["src"]
+            processed_image = detect_and_translate(image_url)
+
             if processed_image:
                 del_url = f"https://{SHOPIFY_STORE}/admin/api/2023-01/products/{product['id']}/images/{image['id']}.json"
                 requests.delete(del_url, headers=SHOPIFY_HEADERS)
                 upload_result = upload_image_to_shopify(product["id"], processed_image)
-                results.append(upload_result)
+                updated.append({
+                    "product_title": title,
+                    "image_url": upload_result.get("image", {}).get("src")
+                })
 
-    return jsonify({"status": "done", "updated_images": len(results)})
+    return jsonify({"status": "done", "updated_images": len(updated), "details": updated})
 
 @app.route('/test-ocr')
 def test_ocr():
