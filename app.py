@@ -1,7 +1,6 @@
 import os
 import requests
 import base64
-import re
 from PIL import Image, ImageDraw, ImageFont
 from flask import Flask, jsonify, send_file, request
 from io import BytesIO
@@ -22,49 +21,47 @@ VISION_URL = f"https://vision.googleapis.com/v1/images:annotate?key={GOOGLE_API_
 TRANSLATE_URL = f"https://translation.googleapis.com/language/translate/v2?key={GOOGLE_API_KEY}"
 
 app = Flask(__name__)
+app.debug = True  # Show errors if app crashes
 
 @app.route('/')
 def home():
-    return '✅ Shopify Translator is running. Use /start or /test-ocr?img=URL'
-
-def contains_chinese(text):
-    """Detect Chinese characters using Unicode ranges"""
-    return any('\u4e00' <= char <= '\u9fff' for char in text)
+    return '✅ Shopify Translator is running. Use /start or /test-ocr?img='
 
 def detect_and_translate(image_url):
     try:
         print(f"🔍 Processing image: {image_url}")
-        
+        img_resp = requests.get(image_url)
+        if img_resp.status_code != 200:
+            print(f"❌ Failed to fetch image: {image_url}")
+            return None
+        img_bytes = img_resp.content
+        b64 = base64.b64encode(img_bytes).decode("utf-8")
+
         vision_payload = {
             "requests": [{
-                "image": {
-                    "source": {
-                        "imageUri": image_url
-                    }
-                },
+                "image": {"content": b64},
                 "features": [{"type": "TEXT_DETECTION"}]
             }]
         }
 
         vision_resp = requests.post(VISION_URL, json=vision_payload).json()
-        annotations = vision_resp.get("responses", [{}])[0].get("textAnnotations", [])
-        if not annotations:
-            print("⚠️ No text found in image.")
+        print("📦 Vision API response:", vision_resp)
+
+        if "responses" not in vision_resp or not vision_resp["responses"]:
+            print("❌ Invalid response from Vision API")
             return None
 
-        img_bytes = requests.get(image_url).content
+        annotations = vision_resp["responses"][0].get("textAnnotations", [])
+        if not annotations:
+            print("❌ No text detected in image")
+            return None
+
         base_img = Image.open(BytesIO(img_bytes)).convert("RGB")
         draw = ImageDraw.Draw(base_img)
         font = ImageFont.load_default()
 
-        found_chinese = False
-
         for text_data in annotations[1:]:
             orig_text = text_data["description"]
-            if not contains_chinese(orig_text):
-                continue
-
-            found_chinese = True
             bbox = text_data["boundingPoly"]["vertices"]
 
             translate_resp = requests.post(TRANSLATE_URL, json={
@@ -78,15 +75,10 @@ def detect_and_translate(image_url):
                 continue
 
             print(f"✅ '{orig_text}' ➜ '{translated}'")
-
             x = bbox[0].get("x", 0)
             y = bbox[0].get("y", 0)
             draw.rectangle([x, y, x + 100, y + 20], fill="white")
             draw.text((x, y), translated, fill="black", font=font)
-
-        if not found_chinese:
-            print("🚫 No Chinese text detected. Skipping image.")
-            return None
 
         output = BytesIO()
         base_img.save(output, format="JPEG")
@@ -97,41 +89,46 @@ def detect_and_translate(image_url):
         return None
 
 def upload_image_to_shopify(product_id, image_data):
-    encoded = base64.b64encode(image_data.read()).decode()
-    payload = {"image": {"attachment": encoded}}
-
-    url = f"https://{SHOPIFY_STORE}/admin/api/2023-01/products/{product_id}/images.json"
-    return requests.post(url, headers=SHOPIFY_HEADERS, json=payload).json()
+    try:
+        encoded = base64.b64encode(image_data.read()).decode()
+        payload = {"image": {"attachment": encoded}}
+        url = f"https://{SHOPIFY_STORE}/admin/api/2023-01/products/{product_id}/images.json"
+        response = requests.post(url, headers=SHOPIFY_HEADERS, json=payload)
+        return response.json()
+    except Exception as e:
+        print(f"❌ Error uploading image to Shopify: {e}")
+        return None
 
 @app.route('/start', methods=['GET'])
 def process_products():
-    url = f"https://{SHOPIFY_STORE}/admin/api/2023-01/products.json?limit=10"
     try:
+        url = f"https://{SHOPIFY_STORE}/admin/api/2023-01/products.json?limit=10"
         response = requests.get(url, headers=SHOPIFY_HEADERS)
-        products = response.json().get("products", [])
+        data = response.json()
+        products = data.get("products", [])
+
+        if not products:
+            print("❌ No products found")
+            return jsonify({"status": "done", "updated_images": 0, "message": "No products found"})
+
+        results = []
+
+        for product in products:
+            print(f"🛍️ Processing product: {product['title']}")
+            for image in product.get("images", []):
+                processed_image = detect_and_translate(image["src"])
+                if processed_image:
+                    del_url = f"https://{SHOPIFY_STORE}/admin/api/2023-01/products/{product['id']}/images/{image['id']}.json"
+                    requests.delete(del_url, headers=SHOPIFY_HEADERS)
+                    upload_result = upload_image_to_shopify(product["id"], processed_image)
+                    results.append(upload_result)
+                else:
+                    print(f"⚠️ Skipped image (not translated): {image['src']}")
+
+        return jsonify({"status": "done", "updated_images": len(results)})
     except Exception as e:
-        return jsonify({"error": "Failed to fetch products", "details": str(e)}), 500
-
-    updated = []
-
-    for product in products:
-        title = product.get("title")
-        print(f"\n📦 Processing Product: {title}")
-
-        for image in product.get("images", []):
-            image_url = image["src"]
-            processed_image = detect_and_translate(image_url)
-
-            if processed_image:
-                del_url = f"https://{SHOPIFY_STORE}/admin/api/2023-01/products/{product['id']}/images/{image['id']}.json"
-                requests.delete(del_url, headers=SHOPIFY_HEADERS)
-                upload_result = upload_image_to_shopify(product["id"], processed_image)
-                updated.append({
-                    "product_title": title,
-                    "image_url": upload_result.get("image", {}).get("src")
-                })
-
-    return jsonify({"status": "done", "updated_images": len(updated), "details": updated})
+        print(f"❌ Error in /start: {e}")
+        return jsonify({"error": "Internal Server Error", "details": str(e)}), 500
 
 @app.route('/test-ocr')
 def test_ocr():
