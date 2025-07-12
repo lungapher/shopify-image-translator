@@ -28,39 +28,38 @@ def home():
 
 def detect_and_translate(image_url):
     try:
-        print(f"🔍 Processing image: {image_url}")
+        print(f"🔍 Fetching image: {image_url}")
+        img_resp = requests.get(image_url)
+        if img_resp.status_code != 200:
+            print(f"❌ Failed to fetch image. Status: {img_resp.status_code}")
+            return None
 
-        # Step 1: Call Vision API with imageUri
+        img_bytes = img_resp.content
+        b64 = base64.b64encode(img_bytes).decode("utf-8")
+
         vision_payload = {
             "requests": [{
-                "image": {
-                    "source": {
-                        "imageUri": image_url
-                    }
-                },
+                "image": {"content": b64},
                 "features": [{"type": "TEXT_DETECTION"}]
             }]
         }
 
         vision_resp = requests.post(VISION_URL, json=vision_payload).json()
-        print("📦 Vision API response:", vision_resp)
+        print("📦 Google Vision Response:", vision_resp)
 
         if "responses" not in vision_resp or not vision_resp["responses"]:
-            print("❌ Vision API returned no response")
+            print("❌ No responses from Vision API.")
             return None
 
         annotations = vision_resp["responses"][0].get("textAnnotations", [])
         if not annotations:
-            print("❌ No text detected in image")
+            print("❌ No textAnnotations found in image.")
             return None
 
-        # Step 2: Download image for drawing
-        img_bytes = requests.get(image_url).content
         base_img = Image.open(BytesIO(img_bytes)).convert("RGB")
         draw = ImageDraw.Draw(base_img)
         font = ImageFont.load_default()
 
-        # Step 3: Translate and overlay
         for text_data in annotations[1:]:
             orig_text = text_data["description"]
             bbox = text_data["boundingPoly"]["vertices"]
@@ -73,22 +72,21 @@ def detect_and_translate(image_url):
 
             translated = translate_resp.get("data", {}).get("translations", [{}])[0].get("translatedText")
             if not translated:
-                print(f"⚠️ Could not translate: {orig_text}")
                 continue
 
-            print(f"✅ '{orig_text}' ➜ '{translated}'")
-
+            print(f"💬 {orig_text} ➜ {translated}")
             x = bbox[0].get("x", 0)
             y = bbox[0].get("y", 0)
-            draw.rectangle([x, y, x + 100, y + 20], fill="white")
+            draw.rectangle([x, y, x + 120, y + 25], fill="white")
             draw.text((x, y), translated, fill="black", font=font)
 
         output = BytesIO()
         base_img.save(output, format="JPEG")
         output.seek(0)
         return output
+
     except Exception as e:
-        print(f"❌ Error in detect_and_translate: {e}")
+        print(f"❌ EXCEPTION in detect_and_translate: {e}")
         return None
 
 def upload_image_to_shopify(product_id, image_data):
@@ -97,10 +95,11 @@ def upload_image_to_shopify(product_id, image_data):
         payload = {"image": {"attachment": encoded}}
 
         url = f"https://{SHOPIFY_STORE}/admin/api/2023-01/products/{product_id}/images.json"
-        response = requests.post(url, headers=SHOPIFY_HEADERS, json=payload)
-        return response.json()
+        result = requests.post(url, headers=SHOPIFY_HEADERS, json=payload)
+        print(f"📤 Shopify upload status: {result.status_code}")
+        return result.json()
     except Exception as e:
-        print(f"❌ Failed to upload image to Shopify: {e}")
+        print(f"❌ Failed to upload to Shopify: {e}")
         return {}
 
 @app.route('/start', methods=['GET'])
@@ -122,6 +121,8 @@ def process_products():
                 requests.delete(del_url, headers=SHOPIFY_HEADERS)
                 upload_result = upload_image_to_shopify(product["id"], processed_image)
                 results.append(upload_result)
+            else:
+                print(f"❌ Skipping image {image['src']} — processing failed.")
 
     return jsonify({"status": "done", "updated_images": len(results)})
 
@@ -134,3 +135,4 @@ def test_ocr():
     if processed_image:
         return send_file(processed_image, mimetype='image/jpeg')
     return "❌ Failed to process image", 500
+
