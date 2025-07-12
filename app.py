@@ -8,7 +8,14 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+SHOPIFY_STORE = os.getenv("SHOPIFY_STORE_DOMAIN")
+SHOPIFY_ADMIN_TOKEN = os.getenv("SHOPIFY_ADMIN_TOKEN")
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+
+SHOPIFY_HEADERS = {
+    "X-Shopify-Access-Token": SHOPIFY_ADMIN_TOKEN,
+    "Content-Type": "application/json"
+}
 
 VISION_URL = f"https://vision.googleapis.com/v1/images:annotate?key={GOOGLE_API_KEY}"
 TRANSLATE_URL = f"https://translation.googleapis.com/language/translate/v2?key={GOOGLE_API_KEY}"
@@ -17,7 +24,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return '✅ Shopify Translator is running. Use /test-ocr?img=URL'
+    return '✅ Shopify Translator is running. Use /start or /test-ocr?img=URL'
 
 def detect_and_translate(image_url):
     try:
@@ -44,7 +51,6 @@ def detect_and_translate(image_url):
         if not annotations:
             return None
 
-        # Download image
         img_bytes = requests.get(image_url).content
         base_img = Image.open(BytesIO(img_bytes)).convert("RGB")
         draw = ImageDraw.Draw(base_img)
@@ -78,6 +84,35 @@ def detect_and_translate(image_url):
     except Exception as e:
         print(f"❌ Error in detect_and_translate: {e}")
         return None
+
+def upload_image_to_shopify(product_id, image_data):
+    encoded = base64.b64encode(image_data.read()).decode()
+    payload = {"image": {"attachment": encoded}}
+
+    url = f"https://{SHOPIFY_STORE}/admin/api/2023-01/products/{product_id}/images.json"
+    return requests.post(url, headers=SHOPIFY_HEADERS, json=payload).json()
+
+@app.route('/start', methods=['GET'])
+def process_products():
+    url = f"https://{SHOPIFY_STORE}/admin/api/2023-01/products.json?limit=10"
+    try:
+        response = requests.get(url, headers=SHOPIFY_HEADERS)
+        products = response.json().get("products", [])
+    except Exception as e:
+        return jsonify({"error": "Failed to fetch products", "details": str(e)}), 500
+
+    results = []
+
+    for product in products:
+        for image in product.get("images", []):
+            processed_image = detect_and_translate(image["src"])
+            if processed_image:
+                del_url = f"https://{SHOPIFY_STORE}/admin/api/2023-01/products/{product['id']}/images/{image['id']}.json"
+                requests.delete(del_url, headers=SHOPIFY_HEADERS)
+                upload_result = upload_image_to_shopify(product["id"], processed_image)
+                results.append(upload_result)
+
+    return jsonify({"status": "done", "updated_images": len(results)})
 
 @app.route('/test-ocr')
 def test_ocr():
