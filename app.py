@@ -24,7 +24,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return '✅ Shopify Translator is running. Use /start or /test-ocr?img=URL'
+    return '✅ Shopify Translator is running. Use /start, /test-ocr, or /test-product'
 
 def detect_and_translate(image_url):
     try:
@@ -44,7 +44,7 @@ def detect_and_translate(image_url):
         }
 
         vision_resp = requests.post(VISION_URL, json=vision_payload).json()
-        print("📦 Vision API response keys:", vision_resp.keys())
+        print("📦 Vision API raw:", vision_resp)
 
         annotations = vision_resp.get("responses", [{}])[0].get("textAnnotations", [])
         if not annotations:
@@ -89,7 +89,8 @@ def upload_image_to_shopify(product_id, image_data):
     encoded = base64.b64encode(image_data.read()).decode()
     payload = { "image": { "attachment": encoded } }
     url = f"https://{SHOPIFY_STORE}/admin/api/2023-01/products/{product_id}/images.json"
-    return requests.post(url, headers=SHOPIFY_HEADERS, json=payload).json()
+    response = requests.post(url, headers=SHOPIFY_HEADERS, json=payload)
+    return response.json()
 
 @app.route('/start', methods=['GET'])
 def process_products():
@@ -101,6 +102,7 @@ def process_products():
         return jsonify({"error": "Failed to fetch products", "details": str(e)}), 500
 
     results = []
+
     for product in products:
         product_id = product.get("id")
         for image in product.get("images", []):
@@ -124,3 +126,16 @@ def test_ocr():
     if processed_image:
         return send_file(processed_image, mimetype='image/jpeg')
     return "❌ Failed to process image", 500
+
+@app.route('/test-product')
+def test_product():
+    # Change these values to one product and image you want to test
+    product_id = "YOUR_PRODUCT_ID"
+    image_url = "https://salibay.com/cdn/shop/files/O1CN01hYSNtF1miYdArdBvr__2219787484988-0-cib.jpg"
+
+    processed_image = detect_and_translate(image_url)
+    if not processed_image:
+        return "❌ Failed to process image", 500
+
+    upload_result = upload_image_to_shopify(product_id, processed_image)
+    return jsonify(upload_result)
