@@ -1,6 +1,7 @@
 import os
 import requests
 import base64
+import traceback
 from PIL import Image, ImageDraw, ImageFont
 from flask import Flask, jsonify, send_file, request
 from io import BytesIO
@@ -43,10 +44,12 @@ def detect_and_translate(image_url):
         print("📦 Vision API response:", vision_resp)
 
         if "responses" not in vision_resp or not vision_resp["responses"]:
+            print("❌ Vision API response missing 'responses'")
             return None
 
         annotations = vision_resp["responses"][0].get("textAnnotations", [])
         if not annotations:
+            print("❌ No textAnnotations found")
             return None
 
         base_img = Image.open(BytesIO(img_bytes)).convert("RGB")
@@ -78,56 +81,50 @@ def detect_and_translate(image_url):
         base_img.save(output, format="JPEG")
         output.seek(0)
         return output
+
     except Exception as e:
         print(f"❌ Error in detect_and_translate: {e}")
+        traceback.print_exc()
         return None
 
 def upload_image_to_shopify(product_id, image_data):
-    encoded = base64.b64encode(image_data.read()).decode()
-    payload = {"image": {"attachment": encoded}}
+    try:
+        encoded = base64.b64encode(image_data.read()).decode()
+        payload = {"image": {"attachment": encoded}}
 
-    url = f"https://{SHOPIFY_STORE}/admin/api/2023-01/products/{product_id}/images.json"
-    return requests.post(url, headers=SHOPIFY_HEADERS, json=payload).json()
+        url = f"https://{SHOPIFY_STORE}/admin/api/2023-01/products/{product_id}/images.json"
+        resp = requests.post(url, headers=SHOPIFY_HEADERS, json=payload)
+        return resp.json()
+    except Exception as e:
+        print(f"❌ Upload error: {e}")
+        return {}
 
 @app.route('/start', methods=['GET'])
 def process_products():
     try:
         url = f"https://{SHOPIFY_STORE}/admin/api/2023-01/products.json?limit=10"
         response = requests.get(url, headers=SHOPIFY_HEADERS)
-        print("🔗 Shopify API status:", response.status_code)
-        print("📦 Shopify response:", response.text)
-
-        if response.status_code != 200:
-            return jsonify({"error": "Shopify API error", "status": response.status_code, "body": response.text}), 500
-
-        data = response.json()
-        products = data.get("products", [])
-
-        if not products:
-            return jsonify({"status": "done", "updated_images": 0, "message": "No products found"})
+        response.raise_for_status()
+        products = response.json().get("products", [])
 
         results = []
 
         for product in products:
-            print(f"🛍️ Processing product: {product.get('title')}")
             for image in product.get("images", []):
-                print(f"🖼️ Translating image: {image['src']}")
                 processed_image = detect_and_translate(image["src"])
                 if processed_image:
                     del_url = f"https://{SHOPIFY_STORE}/admin/api/2023-01/products/{product['id']}/images/{image['id']}.json"
-                    del_resp = requests.delete(del_url, headers=SHOPIFY_HEADERS)
-                    print(f"🗑️ Delete response: {del_resp.status_code}")
-
+                    requests.delete(del_url, headers=SHOPIFY_HEADERS)
                     upload_result = upload_image_to_shopify(product["id"], processed_image)
-                    print(f"⬆️ Upload response: {upload_result}")
                     results.append(upload_result)
-                else:
-                    print("⚠️ Skipped image: No translation")
 
         return jsonify({"status": "done", "updated_images": len(results)})
+
     except Exception as e:
-        print(f"❌ Error in /start: {e}")
-        return jsonify({"error": "Internal Server Error", "details": str(e)}), 500
+        return jsonify({
+            "error": str(e),
+            "trace": traceback.format_exc()
+        }), 500
 
 @app.route('/test-ocr')
 def test_ocr():
@@ -139,3 +136,5 @@ def test_ocr():
         return send_file(processed_image, mimetype='image/jpeg')
     return "❌ Failed to process image", 500
 
+if __name__ == '__main__':
+    app.run(debug=True)
