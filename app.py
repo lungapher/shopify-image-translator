@@ -29,12 +29,15 @@ def home():
 def detect_and_translate(image_url):
     try:
         print(f"🔍 Processing image: {image_url}")
-        img_bytes = requests.get(image_url).content
-        b64 = base64.b64encode(img_bytes).decode("utf-8")
 
+        # Step 1: Call Vision API with imageUri
         vision_payload = {
             "requests": [{
-                "image": {"content": b64},
+                "image": {
+                    "source": {
+                        "imageUri": image_url
+                    }
+                },
                 "features": [{"type": "TEXT_DETECTION"}]
             }]
         }
@@ -43,16 +46,21 @@ def detect_and_translate(image_url):
         print("📦 Vision API response:", vision_resp)
 
         if "responses" not in vision_resp or not vision_resp["responses"]:
+            print("❌ Vision API returned no response")
             return None
 
         annotations = vision_resp["responses"][0].get("textAnnotations", [])
         if not annotations:
+            print("❌ No text detected in image")
             return None
 
+        # Step 2: Download image for drawing
+        img_bytes = requests.get(image_url).content
         base_img = Image.open(BytesIO(img_bytes)).convert("RGB")
         draw = ImageDraw.Draw(base_img)
         font = ImageFont.load_default()
 
+        # Step 3: Translate and overlay
         for text_data in annotations[1:]:
             orig_text = text_data["description"]
             bbox = text_data["boundingPoly"]["vertices"]
@@ -65,6 +73,7 @@ def detect_and_translate(image_url):
 
             translated = translate_resp.get("data", {}).get("translations", [{}])[0].get("translatedText")
             if not translated:
+                print(f"⚠️ Could not translate: {orig_text}")
                 continue
 
             print(f"✅ '{orig_text}' ➜ '{translated}'")
@@ -83,11 +92,16 @@ def detect_and_translate(image_url):
         return None
 
 def upload_image_to_shopify(product_id, image_data):
-    encoded = base64.b64encode(image_data.read()).decode()
-    payload = {"image": {"attachment": encoded}}
+    try:
+        encoded = base64.b64encode(image_data.read()).decode()
+        payload = {"image": {"attachment": encoded}}
 
-    url = f"https://{SHOPIFY_STORE}/admin/api/2023-01/products/{product_id}/images.json"
-    return requests.post(url, headers=SHOPIFY_HEADERS, json=payload).json()
+        url = f"https://{SHOPIFY_STORE}/admin/api/2023-01/products/{product_id}/images.json"
+        response = requests.post(url, headers=SHOPIFY_HEADERS, json=payload)
+        return response.json()
+    except Exception as e:
+        print(f"❌ Failed to upload image to Shopify: {e}")
+        return {}
 
 @app.route('/start', methods=['GET'])
 def process_products():
