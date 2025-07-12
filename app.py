@@ -24,33 +24,40 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return '✅ Shopify Translator is running. Use /start, /test-ocr, or /test-product'
+    return '✅ Shopify Translator is running. Use /start or /test-ocr?img=URL'
 
 def detect_and_translate(image_url):
     try:
         print(f"🔍 Processing image: {image_url}")
-        img_resp = requests.get(image_url)
-        if img_resp.status_code != 200:
-            print(f"❌ Failed to download image: {image_url}")
-            return None
-        img_bytes = img_resp.content
-        b64 = base64.b64encode(img_bytes).decode("utf-8")
 
+        # Use imageUri directly (instead of base64 content)
         vision_payload = {
             "requests": [{
-                "image": {"content": b64},
+                "image": {
+                    "source": {
+                        "imageUri": image_url
+                    }
+                },
                 "features": [{"type": "TEXT_DETECTION"}]
             }]
         }
 
         vision_resp = requests.post(VISION_URL, json=vision_payload).json()
-        print("📦 Vision API raw:", vision_resp)
+        print("📦 Vision API response:", vision_resp)
 
-        annotations = vision_resp.get("responses", [{}])[0].get("textAnnotations", [])
-        if not annotations:
-            print("❌ No text detected in image.")
+        if "error" in vision_resp:
+            print("❌ Vision API error:", vision_resp["error"])
             return None
 
+        if "responses" not in vision_resp or not vision_resp["responses"]:
+            return None
+
+        annotations = vision_resp["responses"][0].get("textAnnotations", [])
+        if not annotations:
+            return None
+
+        # Download image bytes after confirming text exists
+        img_bytes = requests.get(image_url).content
         base_img = Image.open(BytesIO(img_bytes)).convert("RGB")
         draw = ImageDraw.Draw(base_img)
         font = ImageFont.load_default()
@@ -59,6 +66,7 @@ def detect_and_translate(image_url):
             orig_text = text_data["description"]
             bbox = text_data["boundingPoly"]["vertices"]
 
+            # Translate
             translate_resp = requests.post(TRANSLATE_URL, json={
                 "q": orig_text,
                 "target": "en",
@@ -73,7 +81,7 @@ def detect_and_translate(image_url):
 
             x = bbox[0].get("x", 0)
             y = bbox[0].get("y", 0)
-            draw.rectangle([x, y, x + 150, y + 30], fill="white")
+            draw.rectangle([x, y, x + 100, y + 20], fill="white")
             draw.text((x, y), translated, fill="black", font=font)
 
         output = BytesIO()
@@ -87,10 +95,10 @@ def detect_and_translate(image_url):
 
 def upload_image_to_shopify(product_id, image_data):
     encoded = base64.b64encode(image_data.read()).decode()
-    payload = { "image": { "attachment": encoded } }
+    payload = {"image": {"attachment": encoded}}
+
     url = f"https://{SHOPIFY_STORE}/admin/api/2023-01/products/{product_id}/images.json"
-    response = requests.post(url, headers=SHOPIFY_HEADERS, json=payload)
-    return response.json()
+    return requests.post(url, headers=SHOPIFY_HEADERS, json=payload).json()
 
 @app.route('/start', methods=['GET'])
 def process_products():
@@ -104,16 +112,13 @@ def process_products():
     results = []
 
     for product in products:
-        product_id = product.get("id")
         for image in product.get("images", []):
             processed_image = detect_and_translate(image["src"])
             if processed_image:
-                del_url = f"https://{SHOPIFY_STORE}/admin/api/2023-01/products/{product_id}/images/{image['id']}.json"
+                del_url = f"https://{SHOPIFY_STORE}/admin/api/2023-01/products/{product['id']}/images/{image['id']}.json"
                 requests.delete(del_url, headers=SHOPIFY_HEADERS)
-                upload_result = upload_image_to_shopify(product_id, processed_image)
+                upload_result = upload_image_to_shopify(product["id"], processed_image)
                 results.append(upload_result)
-            else:
-                print(f"❌ Failed to translate image for product: {product_id}")
 
     return jsonify({"status": "done", "updated_images": len(results)})
 
@@ -127,15 +132,3 @@ def test_ocr():
         return send_file(processed_image, mimetype='image/jpeg')
     return "❌ Failed to process image", 500
 
-@app.route('/test-product')
-def test_product():
-    # Change these values to one product and image you want to test
-    product_id = "YOUR_PRODUCT_ID"
-    image_url = "https://salibay.com/cdn/shop/files/O1CN01hYSNtF1miYdArdBvr__2219787484988-0-cib.jpg"
-
-    processed_image = detect_and_translate(image_url)
-    if not processed_image:
-        return "❌ Failed to process image", 500
-
-    upload_result = upload_image_to_shopify(product_id, processed_image)
-    return jsonify(upload_result)
