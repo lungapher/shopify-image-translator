@@ -96,49 +96,66 @@ def upload_image_to_shopify(product_id, image_data):
 
 @app.route('/start', methods=['GET'])
 def process_products():
-    print("📦 Fetching products from Shopify...")
     url = f"https://{SHOPIFY_STORE}/admin/api/2023-01/products.json?limit=10"
     try:
         response = requests.get(url, headers=SHOPIFY_HEADERS)
         response.raise_for_status()
         products = response.json().get("products", [])
-        print(f"🛍️ Found {len(products)} products.")
     except Exception as e:
-        print(f"❌ Failed to fetch products: {e}")
         return jsonify({"error": "Failed to fetch products", "details": str(e)}), 500
 
     if not products:
-        print("⚠️ No products found.")
         return jsonify({"status": "no products found"}), 200
 
     results = []
+    failed = []
 
     for product in products:
         product_id = product.get("id")
         images = product.get("images", [])
-        print(f"📷 Processing Product ID: {product_id} with {len(images)} images.")
+
+        if not images:
+            print(f"❌ No images for product {product.get('title', 'Unknown')}")
+            continue
 
         for image in images:
+            img_src = image.get("src")
+            if not img_src:
+                print(f"⚠️ Skipping image with no 'src' in product ID {product_id}")
+                continue
+
+            processed_image = detect_and_translate(img_src)
+            if not processed_image:
+                failed.append({"product_id": product_id, "image_src": img_src, "reason": "OCR failed"})
+                continue
+
             try:
-                image_url = image.get("src")
+                # If image ID exists, delete the original image
                 image_id = image.get("id")
-                print(f"🔎 Translating image {image_id}: {image_url}")
-                processed_image = detect_and_translate(image_url)
-                if not processed_image:
-                    print(f"⚠️ Skipped: No translated image for {image_url}")
-                    continue
+                if product_id and image_id:
+                    del_url = f"https://{SHOPIFY_STORE}/admin/api/2023-01/products/{product_id}/images/{image_id}.json"
+                    del_resp = requests.delete(del_url, headers=SHOPIFY_HEADERS)
+                    print(f"🗑️ Deleted image {image_id} of product {product_id}: {del_resp.status_code}")
+                else:
+                    print(f"⚠️ Missing product_id or image_id — skipping deletion")
 
-                del_url = f"https://{SHOPIFY_STORE}/admin/api/2023-01/products/{product_id}/images/{image_id}.json"
-                del_resp = requests.delete(del_url, headers=SHOPIFY_HEADERS)
-                print(f"🗑️ Deleted original image {image_id} → Status {del_resp.status_code}")
-
+                # Upload new image
                 upload_result = upload_image_to_shopify(product_id, processed_image)
-                results.append(upload_result)
-                print(f"✅ Uploaded translated image for product {product_id}")
-            except Exception as e:
-                print(f"❌ Image processing failed for product {product_id}: {e}")
+                if upload_result and upload_result.get("image"):
+                    results.append(upload_result)
+                else:
+                    failed.append({"product_id": product_id, "image_src": img_src, "reason": "Upload failed"})
 
-    return jsonify({"status": "done", "updated_images": len(results)})
+            except Exception as e:
+                failed.append({"product_id": product_id, "image_src": img_src, "reason": str(e)})
+                print(f"❌ Error processing product {product_id}: {e}")
+
+    return jsonify({
+        "status": "done",
+        "updated_images": len(results),
+        "failed_updates": len(failed),
+        "failed_logs": failed
+    })
 
 
 @app.route('/test-ocr')
