@@ -9,12 +9,10 @@ from dotenv import load_dotenv
 load_dotenv()
 app = Flask(__name__)
 
-# Load environment variables
 SHOPIFY_STORE = os.getenv("SHOPIFY_STORE_DOMAIN")
 SHOPIFY_ADMIN_TOKEN = os.getenv("SHOPIFY_ADMIN_TOKEN")
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 
-# Headers
 SHOPIFY_HEADERS = {
     "X-Shopify-Access-Token": SHOPIFY_ADMIN_TOKEN,
     "Content-Type": "application/json"
@@ -23,9 +21,11 @@ SHOPIFY_HEADERS = {
 VISION_URL = f"https://vision.googleapis.com/v1/images:annotate?key={GOOGLE_API_KEY}"
 TRANSLATE_URL = f"https://translation.googleapis.com/language/translate/v2?key={GOOGLE_API_KEY}"
 
+failed_logs = []
+
 @app.route('/')
 def home():
-    return '✅ Shopify Translator is running. Use /start or /test-ocr?img=URL'
+    return '✅ Shopify Translator is running. Use /start, /test-ocr?img=URL, or /failed'
 
 def detect_and_translate(image_url):
     try:
@@ -33,7 +33,6 @@ def detect_and_translate(image_url):
         img_bytes = requests.get(image_url).content
         b64 = base64.b64encode(img_bytes).decode("utf-8")
 
-        # Vision API call
         vision_payload = {
             "requests": [{
                 "image": {"content": b64},
@@ -47,7 +46,6 @@ def detect_and_translate(image_url):
             print("⚠️ No text found.")
             return None
 
-        # Prepare image for drawing
         base_img = Image.open(BytesIO(img_bytes)).convert("RGB")
         draw = ImageDraw.Draw(base_img)
         font = ImageFont.truetype("arial.ttf", 12) if os.path.exists("arial.ttf") else ImageFont.load_default()
@@ -56,7 +54,6 @@ def detect_and_translate(image_url):
             orig_text = text_data["description"]
             bbox = text_data["boundingPoly"]["vertices"]
 
-            # Translate text
             trans_resp = requests.post(TRANSLATE_URL, json={
                 "q": orig_text, "target": "en", "format": "text"
             }).json()
@@ -69,9 +66,8 @@ def detect_and_translate(image_url):
             x = bbox[0].get("x", 0)
             y = bbox[0].get("y", 0)
 
-            # Draw white background
             text_width = draw.textlength(translated, font=font)
-            draw.rectangle([x, y, x + text_width + 10, y + 20], fill="white")
+            draw.rectangle([x, y, x + text_width + 10, y + 25], fill="white")
             draw.text((x, y), translated, fill="black", font=font)
 
         output = BytesIO()
@@ -129,20 +125,28 @@ def process_products():
 
             if processed:
                 try:
-                    # Delete old
                     del_url = f"https://{SHOPIFY_STORE}/admin/api/2023-01/products/{product_id}/images/{img_id}.json"
                     del_resp = requests.delete(del_url, headers=SHOPIFY_HEADERS)
                     print(f"🗑️ Deleted old image {img_id} - status {del_resp.status_code}")
 
-                    # Upload new
                     upload_image_to_shopify(product_id, processed)
                     updated_images += 1
                 except Exception as e:
                     print(f"❌ Error updating product {product_id}: {e}")
+                    failed_logs.append({
+                        "product_id": product_id,
+                        "image_id": img_id,
+                        "reason": str(e)
+                    })
             else:
                 print("❌ Image translation failed")
+                failed_logs.append({
+                    "product_id": product_id,
+                    "image_id": img_id,
+                    "reason": "Image translation failed"
+                })
 
-    return jsonify({"status": "done", "updated_images": updated_images})
+    return jsonify({"status": "done", "updated_images": updated_images, "failed": len(failed_logs)})
 
 @app.route('/test-ocr')
 def test_ocr():
@@ -151,3 +155,7 @@ def test_ocr():
         return "❌ Provide ?img=image_url", 400
     processed = detect_and_translate(img)
     return send_file(processed, mimetype="image/jpeg") if processed else ("❌ Failed to process image", 500)
+
+@app.route('/failed')
+def failed_log():
+    return jsonify({"failed_logs": failed_logs})
