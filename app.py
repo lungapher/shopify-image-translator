@@ -1,5 +1,3 @@
-# Upgraded `app.py` with enhanced /start debug logging and error handling
-
 from flask import Flask, jsonify, request, send_file
 from PIL import Image, ImageDraw, ImageFont
 from io import BytesIO
@@ -12,10 +10,12 @@ load_dotenv()
 
 app = Flask(__name__)
 
+# Load environment variables
 SHOPIFY_STORE = os.getenv("SHOPIFY_STORE_DOMAIN")
 SHOPIFY_ADMIN_TOKEN = os.getenv("SHOPIFY_ADMIN_TOKEN")
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 
+# Headers
 SHOPIFY_HEADERS = {
     "X-Shopify-Access-Token": SHOPIFY_ADMIN_TOKEN,
     "Content-Type": "application/json"
@@ -24,9 +24,12 @@ SHOPIFY_HEADERS = {
 VISION_URL = f"https://vision.googleapis.com/v1/images:annotate?key={GOOGLE_API_KEY}"
 TRANSLATE_URL = f"https://translation.googleapis.com/language/translate/v2?key={GOOGLE_API_KEY}"
 
+# In-memory log for failed translations
+FAILED_LOGS = []
+
 @app.route('/')
 def home():
-    return '✅ Shopify Translator is running. Use /start or /test-ocr?img=URL'
+    return '✅ Shopify Translator is running. Use /start, /test-ocr?img=URL or /failed'
 
 def detect_and_translate(image_url):
     try:
@@ -42,8 +45,6 @@ def detect_and_translate(image_url):
         }
 
         vision_resp = requests.post(VISION_URL, json=vision_payload).json()
-        print("📦 Vision API response:", vision_resp)
-
         if "responses" not in vision_resp or not vision_resp["responses"]:
             return None
 
@@ -53,7 +54,10 @@ def detect_and_translate(image_url):
 
         base_img = Image.open(BytesIO(img_bytes)).convert("RGB")
         draw = ImageDraw.Draw(base_img)
-        font = ImageFont.truetype("arial.ttf", size=12) if os.path.exists("arial.ttf") else ImageFont.load_default()
+        try:
+            font = ImageFont.truetype("arial.ttf", size=12)
+        except:
+            font = ImageFont.load_default()
 
         for text_data in annotations[1:]:
             orig_text = text_data["description"]
@@ -70,7 +74,6 @@ def detect_and_translate(image_url):
                 continue
 
             print(f"✅ '{orig_text}' ➜ '{translated}'")
-
             x = bbox[0].get("x", 0)
             y = bbox[0].get("y", 0)
             draw.rectangle([x, y, x + 120, y + 25], fill="white")
@@ -96,49 +99,66 @@ def upload_image_to_shopify(product_id, image_data):
 
 @app.route('/start', methods=['GET'])
 def process_products():
-    print("📦 Fetching products from Shopify...")
     url = f"https://{SHOPIFY_STORE}/admin/api/2023-01/products.json?limit=10"
     try:
         response = requests.get(url, headers=SHOPIFY_HEADERS)
         response.raise_for_status()
         products = response.json().get("products", [])
-        print(f"🛍️ Found {len(products)} products.")
     except Exception as e:
-        print(f"❌ Failed to fetch products: {e}")
-        return jsonify({"error": "Failed to fetch products", "details": str(e)}), 500
+        return jsonify({"error": "❌ Failed to fetch products", "details": str(e)}), 500
 
     if not products:
-        print("⚠️ No products found.")
         return jsonify({"status": "no products found"}), 200
 
     results = []
+    FAILED_LOGS.clear()
 
     for product in products:
-        product_id = product.get("id")
-        images = product.get("images", [])
-        print(f"📷 Processing Product ID: {product_id} with {len(images)} images.")
+        try:
+            product_id = product.get("id")
+            images = product.get("images") or [product.get("image")] if product.get("image") else []
 
-        for image in images:
-            try:
-                image_url = image.get("src")
-                image_id = image.get("id")
-                print(f"🔎 Translating image {image_id}: {image_url}")
-                processed_image = detect_and_translate(image_url)
-                if not processed_image:
-                    print(f"⚠️ Skipped: No translated image for {image_url}")
+            for image in images:
+                if not image or not image.get("src"):
                     continue
 
-                del_url = f"https://{SHOPIFY_STORE}/admin/api/2023-01/products/{product_id}/images/{image_id}.json"
-                del_resp = requests.delete(del_url, headers=SHOPIFY_HEADERS)
-                print(f"🗑️ Deleted original image {image_id} → Status {del_resp.status_code}")
+                img_src = image.get("src")
+                image_id = image.get("id")
 
-                upload_result = upload_image_to_shopify(product_id, processed_image)
-                results.append(upload_result)
-                print(f"✅ Uploaded translated image for product {product_id}")
-            except Exception as e:
-                print(f"❌ Image processing failed for product {product_id}: {e}")
+                processed_image = detect_and_translate(img_src)
+                if not processed_image:
+                    FAILED_LOGS.append({
+                        "product_id": product_id,
+                        "image_src": img_src,
+                        "error": "Failed to process image"
+                    })
+                    continue
 
-    return jsonify({"status": "done", "updated_images": len(results)})
+                try:
+                    # Delete original image if image_id exists
+                    if image_id:
+                        del_url = f"https://{SHOPIFY_STORE}/admin/api/2023-01/products/{product_id}/images/{image_id}.json"
+                        requests.delete(del_url, headers=SHOPIFY_HEADERS)
+
+                    upload_result = upload_image_to_shopify(product_id, processed_image)
+                    results.append(upload_result)
+                except Exception as img_err:
+                    FAILED_LOGS.append({
+                        "product_id": product_id,
+                        "image_src": img_src,
+                        "error": str(img_err)
+                    })
+        except Exception as e:
+            FAILED_LOGS.append({
+                "product_id": product.get("id"),
+                "error": str(e)
+            })
+
+    return jsonify({
+        "status": "done",
+        "updated_images": len(results),
+        "failed": FAILED_LOGS
+    })
 
 @app.route('/test-ocr')
 def test_ocr():
@@ -149,3 +169,7 @@ def test_ocr():
     if processed_image:
         return send_file(processed_image, mimetype='image/jpeg')
     return "❌ Failed to process image", 500
+
+@app.route('/failed')
+def get_failed_logs():
+    return jsonify({"failed": FAILED_LOGS})
