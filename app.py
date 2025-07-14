@@ -140,6 +140,7 @@ def process_products():
 
     return jsonify({"status": "done", "updated_images": len(results)})
 
+
 @app.route('/test-ocr')
 def test_ocr():
     img = request.args.get("img")
