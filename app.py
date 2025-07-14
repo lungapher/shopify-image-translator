@@ -1,26 +1,29 @@
+from flask import Flask, jsonify, request, send_file
+from PIL import Image, ImageDraw, ImageFont
+from io import BytesIO
+import base64
 import os
 import requests
-import base64
-from PIL import Image, ImageDraw, ImageFont
-from flask import Flask, jsonify, send_file, request
-from io import BytesIO
 from dotenv import load_dotenv
 
 load_dotenv()
 
+app = Flask(__name__)
+
+# Load environment variables
 SHOPIFY_STORE = os.getenv("SHOPIFY_STORE_DOMAIN")
 SHOPIFY_ADMIN_TOKEN = os.getenv("SHOPIFY_ADMIN_TOKEN")
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 
+# Shopify API headers
 SHOPIFY_HEADERS = {
     "X-Shopify-Access-Token": SHOPIFY_ADMIN_TOKEN,
     "Content-Type": "application/json"
 }
 
+# Google Cloud Vision and Translate API URLs
 VISION_URL = f"https://vision.googleapis.com/v1/images:annotate?key={GOOGLE_API_KEY}"
 TRANSLATE_URL = f"https://translation.googleapis.com/language/translate/v2?key={GOOGLE_API_KEY}"
-
-app = Flask(__name__)
 
 @app.route('/')
 def home():
@@ -40,20 +43,18 @@ def detect_and_translate(image_url):
         }
 
         vision_resp = requests.post(VISION_URL, json=vision_payload).json()
-        print("📦 Vision API response received.")
+        print("📦 Vision API response:", vision_resp)
 
         if "responses" not in vision_resp or not vision_resp["responses"]:
-            print("❌ No response from Vision API.")
             return None
 
         annotations = vision_resp["responses"][0].get("textAnnotations", [])
         if not annotations:
-            print("❌ No text annotations found.")
             return None
 
         base_img = Image.open(BytesIO(img_bytes)).convert("RGB")
         draw = ImageDraw.Draw(base_img)
-        font = ImageFont.truetype("arial.ttf", 12) if os.path.exists("arial.ttf") else ImageFont.load_default()
+        font = ImageFont.truetype("arial.ttf", size=12) if os.path.exists("arial.ttf") else ImageFont.load_default()
 
         for text_data in annotations[1:]:
             orig_text = text_data["description"]
@@ -70,16 +71,16 @@ def detect_and_translate(image_url):
                 continue
 
             print(f"✅ '{orig_text}' ➜ '{translated}'")
+
             x = bbox[0].get("x", 0)
             y = bbox[0].get("y", 0)
-            draw.rectangle([x, y, x + 150, y + 20], fill="white")
+            draw.rectangle([x, y, x + 120, y + 25], fill="white")
             draw.text((x, y), translated, fill="black", font=font)
 
         output = BytesIO()
         base_img.save(output, format="JPEG")
         output.seek(0)
         return output
-
     except Exception as e:
         print(f"❌ Error in detect_and_translate: {e}")
         return None
@@ -88,62 +89,42 @@ def upload_image_to_shopify(product_id, image_data):
     try:
         encoded = base64.b64encode(image_data.read()).decode()
         payload = {"image": {"attachment": encoded}}
-
         url = f"https://{SHOPIFY_STORE}/admin/api/2023-01/products/{product_id}/images.json"
-        res = requests.post(url, headers=SHOPIFY_HEADERS, json=payload)
-        print(f"📤 Upload response: {res.status_code}")
-        return res.json()
+        return requests.post(url, headers=SHOPIFY_HEADERS, json=payload).json()
     except Exception as e:
-        print(f"❌ Error uploading to Shopify: {e}")
+        print(f"❌ Error uploading image to Shopify: {e}")
         return None
 
 @app.route('/start', methods=['GET'])
 def process_products():
-    print("🚀 Starting image translation for Shopify products...")
     url = f"https://{SHOPIFY_STORE}/admin/api/2023-01/products.json?limit=10"
     try:
         response = requests.get(url, headers=SHOPIFY_HEADERS)
         response.raise_for_status()
         products = response.json().get("products", [])
-        print(f"🛍️ Found {len(products)} products.")
     except Exception as e:
-        print(f"❌ Failed to fetch products: {e}")
         return jsonify({"error": "Failed to fetch products", "details": str(e)}), 500
+
+    if not products:
+        return jsonify({"status": "no products found"}), 200
 
     results = []
 
     for product in products:
-        product_id = product.get('id')
-        product_title = product.get('title')
-        print(f"\n🔹 Processing product: {product_title} (ID: {product_id})")
-
         images = product.get("images", [])
         if not images:
-            print("⚠️ No images found. Skipping product.")
             continue
 
         for image in images:
-            image_id = image.get('id')
-            image_url = image.get('src')
-            if not image_url:
-                print(f"⚠️ No image URL for image ID: {image_id}")
-                continue
-
-            processed_image = detect_and_translate(image_url)
-
+            processed_image = detect_and_translate(image.get("src"))
             if processed_image:
                 try:
-                    del_url = f"https://{SHOPIFY_STORE}/admin/api/2023-01/products/{product_id}/images/{image_id}.json"
-                    del_resp = requests.delete(del_url, headers=SHOPIFY_HEADERS)
-                    print(f"🗑️ Deleted old image (status: {del_resp.status_code})")
-
-                    upload_result = upload_image_to_shopify(product_id, processed_image)
+                    del_url = f"https://{SHOPIFY_STORE}/admin/api/2023-01/products/{product['id']}/images/{image['id']}.json"
+                    requests.delete(del_url, headers=SHOPIFY_HEADERS)
+                    upload_result = upload_image_to_shopify(product["id"], processed_image)
                     results.append(upload_result)
-                    print("✅ Uploaded translated image.")
                 except Exception as e:
-                    print(f"❌ Error processing image {image_id}: {e}")
-            else:
-                print(f"⚠️ Failed to process image: {image_url}")
+                    print(f"Image update failed for product {product['id']}: {e}")
 
     return jsonify({"status": "done", "updated_images": len(results)})
 
@@ -157,5 +138,3 @@ def test_ocr():
         return send_file(processed_image, mimetype='image/jpeg')
     return "❌ Failed to process image", 500
 
-if __name__ == "__main__":
-    app.run(debug=True)
